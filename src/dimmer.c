@@ -86,9 +86,42 @@ void SerialPrint(char *fmt, ...) {
     while ((HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY) && (HAL_UART_GetState(&huart1) != HAL_UART_STATE_BUSY_RX));
 } // void SerialPrint(char *fmt, ...)
 
+volatile uint8_t lock_Next = 0;
+
+// Find next command in command buffer and copy it into CmdNext[]
+void Check_Next_Cmd() {
+	char *pNext;
+
+	while (lock_Next);
+	lock_Next = 1;
+	pNext = memchr(CmdBuf, '\n', CmdBufLength);
+	if (pNext) {
+		// Found EOL char in the buffer, moving command to CmdNext processing buffer
+		int len = pNext - CmdBuf + 1;
+
+		*pNext = '\0';
+		if (len >= (sizeof(CmdNext) - 1)) {
+			memcpy(CmdNext, CmdBuf, sizeof(CmdNext) - 1);
+			CmdNext[sizeof(CmdNext) - 1] = '\0';
+		} else {
+			memcpy(CmdNext, CmdBuf, len);
+			CmdNext[len] = '\0';
+		}
+		FlagProcessCmd = 1;
+		// Remove the command from CmdBuf
+		if (len < CmdBufLength)
+		memcpy(CmdBuf, pNext + 1, CmdBufLength - len);
+		CmdBufLength = CmdBufLength - len;
+	} else {
+		// Check if we have too much garbage in the buffer (no EOL and buffer is full)
+		if (CmdBufLength >= sizeof(CmdBuf))
+			CmdBufLength = 0;
+	}
+	lock_Next = 0;
+} // void Check_Next_Cmd()
+
 // UART receiver callback, puts received char in CmdBuf (and to CmdNext if available)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-	char *pNext;
 #ifdef SERIAL_DEBUG
 	// Echo commands when debugging
 	HAL_UART_Transmit_DMA(&huart1, (uint8_t *) RecvBuf, 1);
@@ -101,27 +134,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	// Check if we can process and have new commands waiting in CmdBuf
 	if (FlagProcessCmd)
 		return;
-	pNext = memchr(CmdBuf, '\n', CmdBufLength);
-	if (pNext) {
-		// Found EOL char in the buffer, moving command to CmdNext processing buffer
-		int len = pNext - CmdBuf + 1;
-
-		*pNext = '\0';
-		if (len < (sizeof(CmdNext) - 1)) {
-			memcpy(CmdNext, CmdBuf, sizeof(CmdNext) - 1);
-			CmdNext[sizeof(CmdNext) - 1] = '\0';
-		} else
-			memcpy(CmdNext, CmdBuf, len);
-		FlagProcessCmd = 1;
-		// Remove the command from CmdBuf
-		if (len < CmdBufLength)
-		memcpy(CmdBuf, pNext + 1, CmdBufLength - len);
-		CmdBufLength = CmdBufLength - len;
-	} else {
-		// Check if we have too much garbage in the buffer (no EOL and buffer is full)
-		if (CmdBufLength > sizeof(CmdBuf))
-			CmdBufLength = 0;
-	}
+	Check_Next_Cmd();
 } // void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 // Read values from ADC buffer and calculate voltages
@@ -257,6 +270,10 @@ void Loop() {
 		LastUpdate = HAL_GetTick();
 		SerialPrint("0:%d\n1:%d\n2:%d\n3:%d\n4:%d\n5:%d\n6:%d\n",
 				Vin, Vphr1, Vphr2, Vadc3, Vadc5, Vdd, Tchip);
+		if (!FlagProcessCmd) {
+					HAL_UART_DMAStop(&huart1);
+					HAL_UART_Receive_DMA(&huart1, (uint8_t *) RecvBuf, sizeof(RecvBuf));
+		}
 	}
 	if (FlagProcessCmd) {
 #ifdef SERIAL_DEBUG
@@ -264,5 +281,6 @@ void Loop() {
 #endif
 		ProcessCmd(CmdNext);
 		FlagProcessCmd = 0;
+		Check_Next_Cmd();
 	}
 } // void loop()
