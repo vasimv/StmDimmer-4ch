@@ -39,6 +39,11 @@ volatile int32_t Vadc5 = 0;
 // Chip's temperature
 volatile int32_t Tchip = 0;
 
+uint8_t MyModbusAddress;
+
+// Located in flash, will be read into MyModbusAddress at the start
+const FlashMyModbusAddress = MODBUS_ADDRESS;
+
 // Channels value array
 uint16_t  Pwm[MY_PWM_CHANNELS] = {0, 0, 0, 0};
 
@@ -53,89 +58,292 @@ volatile uint32_t AdcCount = 0;
 uint16_t AdcAvgData[MY_ADC_CHANNELS];
 
 // UART Receive buffer (just one character actually)
-char RecvBuf[1];
+volatile char RecvBuf[1];
 
-// Command to process
-volatile char CmdNext[MAX_COMMAND_LENGTH];
-// We have a command in the buffer, waiting to process it
-volatile uint8_t FlagProcessCmd = 0;
+// Modbus frame receive buffers (switches while processing)
+uint8_t bufModbus[2][MODBUS_FRAME_BUFFER];
+uint8_t curBuf = 0;
+uint16_t cntBufRecv = 0;
 
-// Buffer for commands waiting for processing
-char CmdBuf[256];
-int CmdBufLength = 0;
+// Address of frame and its length to process (NULL if nothing)
+uint8_t *ModbusFrame = NULL;
+uint16_t cntModbus = 0;
 
-char seroutbuf[256];
+// Output modbus buffer
+uint8_t bufModbusOut[64];
+uint16_t cntOut = 0;
 
-va_list args;
-int nlen;
+void PWM_Timer_Set(TIM_HandleTypeDef *phtim, uint32_t channel, uint32_t pulse, uint8_t inverted);
+
 volatile uint8_t txDoneFlag = 1;
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
     txDoneFlag = 1;
 } // void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
-void SerialPrint(char *fmt, ...) {
-    va_start(args, fmt);
-    nlen = vsnprintf(seroutbuf, sizeof(seroutbuf), fmt, args);
-    va_end(args);
+// Send bytes array to the serial port
+void SerialPut(uint8_t *Buf, int Len) {
     while (!txDoneFlag);
     txDoneFlag = 0;
     while ((HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY) && (HAL_UART_GetState(&huart1) != HAL_UART_STATE_BUSY_RX));
-    HAL_UART_Transmit_DMA(&huart1, (uint8_t *) seroutbuf, nlen);
+    HAL_UART_Transmit_DMA(&huart1, Buf, Len);
     __HAL_UART_ENABLE_IT(&huart1, UART_IT_TC);
     while ((HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY) && (HAL_UART_GetState(&huart1) != HAL_UART_STATE_BUSY_RX));
+} // void SerialPut(uint8_t *Buf, int Len)
+
+#ifdef SERIAL_DEBUG
+va_list args;
+char seroutbuf[128];
+
+void SerialPrint(char *fmt, ...) {
+	int nlen;
+
+    va_start(args, fmt);
+    nlen = vsnprintf(seroutbuf, sizeof(seroutbuf), fmt, args);
+    va_end(args);
+    SerialPut((uint8_t *) seroutbuf, nlen);
 } // void SerialPrint(char *fmt, ...)
-
-volatile uint8_t lock_Next = 0;
-
-// Find next command in command buffer and copy it into CmdNext[]
-void Check_Next_Cmd() {
-	char *pNext;
-
-	while (lock_Next);
-	lock_Next = 1;
-	pNext = memchr(CmdBuf, '\n', CmdBufLength);
-	if (pNext) {
-		// Found EOL char in the buffer, moving command to CmdNext processing buffer
-		int len = pNext - CmdBuf + 1;
-
-		*pNext = '\0';
-		if (len >= (sizeof(CmdNext) - 1)) {
-			memcpy(CmdNext, CmdBuf, sizeof(CmdNext) - 1);
-			CmdNext[sizeof(CmdNext) - 1] = '\0';
-		} else {
-			memcpy(CmdNext, CmdBuf, len);
-			CmdNext[len] = '\0';
-		}
-		FlagProcessCmd = 1;
-		// Remove the command from CmdBuf
-		if (len < CmdBufLength)
-		memcpy(CmdBuf, pNext + 1, CmdBufLength - len);
-		CmdBufLength = CmdBufLength - len;
-	} else {
-		// Check if we have too much garbage in the buffer (no EOL and buffer is full)
-		if (CmdBufLength >= sizeof(CmdBuf))
-			CmdBufLength = 0;
-	}
-	lock_Next = 0;
-} // void Check_Next_Cmd()
+#endif
 
 // UART receiver callback, puts received char in CmdBuf (and to CmdNext if available)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	int len;
+
+	// Check idle time for modbus
+	if (__HAL_TIM_GET_COUNTER(&htim16) > MODBUS_FRAME_IDLE) {
+		if (cntBufRecv > 0) {
+			// Switch buffers and signal to main thread
+			ModbusFrame = bufModbus[curBuf];
+			cntModbus = cntBufRecv;
+			curBuf = curBuf ? 0 : 1;
+			// Start new frame reception
+			cntBufRecv = 0;
+		}
+	}
+	// Reset idle time for modbus
+	__HAL_TIM_SET_COUNTER(&htim16, 0);
 #ifdef SERIAL_DEBUG
 	// Echo commands when debugging
 	HAL_UART_Transmit_DMA(&huart1, (uint8_t *) RecvBuf, 1);
 #endif
-	// Check if we have enough space in buffer for new chars
-	if (CmdBufLength < sizeof(CmdBuf)) {
-		CmdBuf[CmdBufLength] = *RecvBuf;
-		CmdBufLength++;
-	}
-	// Check if we can process and have new commands waiting in CmdBuf
-	if (FlagProcessCmd)
-		return;
-	Check_Next_Cmd();
+	bufModbus[curBuf][cntBufRecv] = RecvBuf[0];
+	cntBufRecv++;
+
+	// Garbage in the receive buffer, discarding
+	if (cntBufRecv >= MODBUS_FRAME_BUFFER)
+		cntBufRecv = 0;
 } // void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+
+// Calculate CRC for modbus frame
+uint16_t ModbusCrc(uint8_t *buf, int len) {
+	uint32_t tmp, tmp2;
+	uint8_t Flag;
+    uint16_t i, j;
+
+    tmp = 0xFFFF;
+    for (i = 0; i < len; i++) {
+        tmp = tmp ^ buf[i];
+        for (j = 1; j <= 8; j++) {
+            Flag = tmp & 0x0001;
+            tmp >>=1;
+            if (Flag)
+                tmp ^= 0xA001;
+        }
+    }
+    tmp2 = tmp >> 8;
+    tmp = (tmp << 8) | tmp2;
+    tmp &= 0xFFFF;
+    return (uint16_t) tmp;
+} // uint16_t ModbusCrc(char *buf, int len)
+
+// Add CRC to output modbus packet
+void AddModbusCrc() {
+	uint16_t tCrc;
+
+	tCrc = ModbusCrc(bufModbusOut, cntOut);
+	bufModbusOut[cntOut] = (tCrc >> 8) & 0xff;
+	cntOut++;
+	bufModbusOut[cntOut] = tCrc & 0xff;
+	cntOut++;
+} // void AddModbusCrc()
+
+// Write a variable to the flash (can write only 1 bits to 0, be careful)
+void FlashVariable(uint16_t *Addr, uint16_t Val) {
+    HAL_StatusTypeDef status = HAL_FLASH_Unlock();
+    CLEAR_BIT(FLASH->CR, FLASH_CR_PER);
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, Addr, Val);
+    HAL_FLASH_Lock();
+} // void FlashVariable(uint16_t *Addr, uint16_t Val)
+
+// Set output holding register (from modbus frame)
+void SetRegister(uint16_t Addr, uint16_t Val) {
+	switch(Addr) {
+	case 0:
+		if (Pwm[0] == Val)
+			return;
+		Pwm[0] = Val;
+		PWM_Timer_Set(&htim3, TIM_CHANNEL_1, Val, 0);
+		break;
+	case 1:
+		if (Pwm[1] == Val)
+			return;
+		Pwm[1] = Val;
+		PWM_Timer_Set(&htim14, TIM_CHANNEL_1, Val, 0);
+		break;
+	case 2:
+		if (Pwm[2] == Val)
+			return;
+		Pwm[2] = Val;
+		PWM_Timer_Set(&htim3, TIM_CHANNEL_4, Val, 1);
+		break;
+	case 3:
+		if (Pwm[3] == Val)
+			return;
+		Pwm[3] = Val;
+		PWM_Timer_Set(&htim3, TIM_CHANNEL_2, Val, 1);
+		break;
+	case 256:
+		// Set my modbus address (it is one-time thing, you will have to erase FLASH to reset!!!
+		MyModbusAddress = Val;
+		FlashVariable(&FlashMyModbusAddress, Val);
+		break;
+	default:
+		break;
+	}
+} // void SetRegister(uint16_t Addr, uint16_t Val)
+
+// Get input register (for modbus master)
+uint16_t GetRegister(uint16_t Addr) {
+	switch(Addr) {
+	case 0:
+		return Vin;
+	case 1:
+		return Vdd;
+	case 2:
+		return Tchip;
+	case 3:
+		return Vphr1;
+	case 4:
+		return Vphr2;
+	case 5:
+		return Vadc3;
+	case 6:
+		return Vadc5;
+	default:
+		break;
+	}
+	return 0;
+} // uint16_t GetRegister(uint16_t Addr)
+
+// Check and process modbus frame, create reply in
+int ProcessModbusFrame(uint8_t *Frame, uint16_t len) {
+	int i;
+	int sum;
+	uint16_t rCrc;
+	uint16_t tAddr, tLen, tVal, tCnt;
+
+	// Not my address
+	if (Frame[0] != MyModbusAddress)
+		return;
+
+	// Check for bad CRC
+	rCrc = (Frame[cntModbus - 2] << 8) | Frame[cntModbus - 1];
+	if (rCrc != ModbusCrc(Frame, len - 2)) {
+#ifdef SERIAL_DEBUG
+		HAL_Delay(2);
+		SerialPrint("bad CRC %x %x\n",
+				rCrc, ModbusCrc(Frame, len - 2));
+		HAL_Delay(2);
+#endif
+		return;
+	}
+	// Preparing header for output
+	bufModbusOut[0] = MyModbusAddress;
+	bufModbusOut[1] = Frame[1];
+	cntOut = 2;
+
+	// Checking incoming message
+	tAddr = (Frame[2] << 8) | Frame[3];
+	switch (Frame[1]) {
+	// Read holding registers (output)
+	case 0x03:
+		tLen = (Frame[4] << 8) | Frame[5];
+		tCnt = 0;
+		cntOut++;
+		for (i = tAddr; i < (tAddr + tLen); i++) {
+			// Fill output buffer with values
+			if ((i >= 0) && (i <= 3)) {
+				tVal = Pwm[i];
+			} else
+				tVal = 0;
+			bufModbusOut[cntOut] = (uint8_t) ((tVal >> 8) & 0xff);
+			cntOut++;
+			bufModbusOut[cntOut] = (uint8_t) (tVal & 0xff);
+			cntOut++;
+			tCnt++;
+			// Break if reply is too long
+			if (cntOut > (sizeof(bufModbusOut) - 8))
+				break;
+		}
+		bufModbusOut[2] = tCnt * 2;
+		break;
+	// Read input registers (ADC inputs)
+	case 0x04:
+		tLen = (Frame[4] << 8) | Frame[5];
+		tCnt = 0;
+		cntOut++;
+		for (i = tAddr; i < (tAddr + tLen); i++) {
+			tVal = GetRegister(i);
+			bufModbusOut[cntOut] = (uint8_t) ((tVal >> 8) & 0xff);
+			cntOut++;
+			bufModbusOut[cntOut] = (uint8_t) (tVal & 0xff);
+			cntOut++;
+			tCnt++;
+			// Break if reply is too long
+			if (cntOut > (sizeof(bufModbusOut) - 8))
+				break;
+		}
+		bufModbusOut[2] = tCnt * 2;
+		break;
+	// Write single holding register (output)
+	case 0x06:
+		tVal = (Frame[4] << 8) | Frame[5];
+
+		SetRegister(tAddr, tVal);
+		bufModbusOut[cntOut] = Frame[2];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[3];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[4];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[5];
+		cntOut++;
+		break;
+	// Write multiple holding registers (output)
+	case 0x10:
+		tLen = (Frame[4] << 8) | Frame[5];
+		for (i = tAddr; i < (tAddr + tLen); i ++) {
+			tVal = (Frame[(i - tAddr) * 2 + 7] << 8) | Frame[(i - tAddr) * 2 + 8];
+			SetRegister(i, tVal);
+		}
+		bufModbusOut[cntOut] = Frame[2];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[3];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[4];
+		cntOut++;
+		bufModbusOut[cntOut] = Frame[5];
+		cntOut++;
+		break;
+	// Unknown code, sending bad function reply
+	default:
+		bufModbusOut[1] = 0x80 | Frame[1];
+		bufModbusOut[2] = 0x01;
+		cntOut = 3;
+		return;
+	}
+	AddModbusCrc();
+} // void ProcessModbusFrame()
 
 // Read values from ADC buffer and calculate voltages
 void UpdateThings() {
@@ -153,14 +361,14 @@ void UpdateThings() {
 	Vadc3 = (Vdd * AdcAvgData[3]) / (uint16_t) (4095 / DIVIDER_RATIO);
 	Vadc5 = (Vdd * AdcAvgData[4]) / (uint16_t) (4095 / DIVIDER_RATIO);
 	Tchip = (((int32_t) AdcAvgData[5]) *  Vdd / (int32_t) 3300) - (int32_t) TS_CAL1;
-	Tchip *= (int32_t)(110000 - 30000);
+	Tchip *= (int32_t)(11000 - 3000);
 	Tchip = Tchip / (int32_t)( TS_CAL2 - TS_CAL1);
-	Tchip += 30000;
-#ifdef SERIAL_DEBUG
-	SerialPrint("A0: %d, A1: %d, A2: %d, A3: %d, A4: %d, A5: %d, A6: %d\n",
-				AdcData[0], AdcData[1], AdcData[2], AdcData[3], AdcData[4], AdcData[5], AdcData[6]);
-	SerialPrint("Cnt: %u, Vdd: %u, Tchip: %u, Vin: %u\n", AdcCount, Vdd, Tchip, Vin);
-#endif
+	Tchip += 3000;
+//#ifdef SERIAL_DEBUG
+//	SerialPrint("A0: %d, A1: %d, A2: %d, A3: %d, A4: %d, A5: %d, A6: %d\n",
+//				AdcData[0], AdcData[1], AdcData[2], AdcData[3], AdcData[4], AdcData[5], AdcData[6]);
+//	SerialPrint("Cnt: %u, Vdd: %u, Tchip: %u, Vin: %u\n", AdcCount, Vdd, Tchip, Vin);
+//#endif
 } // void UpdateThings()
 
 // Start 12-bit ADC (5 ADC channels, temperature, vrefint)
@@ -180,7 +388,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
 // Start debug serial interface
 void StartSerial() {
 #ifdef SERIAL_DEBUG
-	SerialPrint("Serial debug!\n");
+	SerialPrint("D!\n");
 #endif
 	HAL_UART_Receive_DMA(&huart1, (uint8_t *) RecvBuf, sizeof(RecvBuf));
 } // void StartSerial()
@@ -198,6 +406,7 @@ void PWM_Timer_Set(TIM_HandleTypeDef *phtim, uint32_t channel, uint32_t pulse, u
 		sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
 	}
 	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+	HAL_TIM_PWM_Stop(phtim, channel);
 	HAL_TIM_PWM_ConfigChannel(phtim, &sConfigOC, channel);
 	HAL_TIM_PWM_Start(phtim, channel);
 } // PWM_Timer_Set
@@ -206,81 +415,67 @@ void PWM_Timer_Set(TIM_HandleTypeDef *phtim, uint32_t channel, uint32_t pulse, u
 void StartTimers() {
 	HAL_TIM_Base_Start(&htim3);
 	HAL_TIM_Base_Start(&htim14);
+	HAL_TIM_Base_Start(&htim16);
 } // void StartTimers()
+
+// Start watchdog
+void StartIwdg() {
+	HAL_IWDG_Start(&hiwdg);
+} // void StartIwdg()
 
 // Setup things before run
 void Setup() {
 #ifdef SERIAL_DEBUG
 	DBGMCU->CR = 0x7;
 #endif
+	MyModbusAddress = FlashMyModbusAddress;
 	StartSerial();
 	StartTimers();
 	StartAdc();
+	// StartIwdg();
 } // void Setup()
 
-// Process command
-// Format: <Nchannel>:<Value>\n
-void ProcessCmd(char *Cmd) {
-	char *pSplit = memchr(Cmd, ':', MAX_COMMAND_LENGTH);
-	int Chn, Val;
-
-	// Wrong format, doing nothing
-	if (!pSplit)
-		return;
-#ifdef SERIAL_DEBUG
-	SerialPrint("Cmd: %s\n", Cmd);
-#endif
-	Chn = atoi(CmdNext);
-	Val = atoi(pSplit + 1);
-
-	// Check channel number and value
-	if ((Chn < 0) || (Chn > MY_PWM_CHANNELS))
-		return;
-	if (Val < 0)
-		Val = 0;
-	if (Val > PWMRANGE)
-		Val = PWMRANGE;
-	Pwm[Chn] = Val;
-	switch (Chn) {
-	case 0:
-		PWM_Timer_Set(&htim3, TIM_CHANNEL_1, Val, 0);
-		break;
-	case 1:
-		PWM_Timer_Set(&htim14, TIM_CHANNEL_1, Val, 0);
-		break;
-	case 2:
-		// Inverted PWM output (to spread switching current)
-		PWM_Timer_Set(&htim3, TIM_CHANNEL_4, Val, 1);
-		break;
-	case 3:
-		// Inverted PWM output (to spread switching current)
-		PWM_Timer_Set(&htim3, TIM_CHANNEL_2, Val, 1);
-		break;
-	default:
-		break;
-	}
-} // void ProcessCmd(char *Cmd)
-
-int64_t LastUpdate = -9000;
+uint64_t LastUpdate = -9000;
 
 // Main program loop
 void Loop() {
 	if ((HAL_GetTick() - LastUpdate) > REPORT_PERIOD) {
 		UpdateThings();
 		LastUpdate = HAL_GetTick();
-		SerialPrint("0:%d\n1:%d\n2:%d\n3:%d\n4:%d\n5:%d\n6:%d\n",
-				Vin, Vphr1, Vphr2, Vadc3, Vadc5, Vdd, Tchip);
-		if (!FlagProcessCmd) {
-					HAL_UART_DMAStop(&huart1);
-					HAL_UART_Receive_DMA(&huart1, (uint8_t *) RecvBuf, sizeof(RecvBuf));
-		}
-	}
-	if (FlagProcessCmd) {
 #ifdef SERIAL_DEBUG
-		SerialPrint("Processing command: %s", CmdNext);
+ 	SerialPrint("0:%d\n1:%d\n2:%d\n3:%d\n4:%d\n5:%d\n6:%d\n",
+				Vin, Vphr1, Vphr2, Vadc3, Vadc5, Vdd, Tchip);
 #endif
-		ProcessCmd(CmdNext);
-		FlagProcessCmd = 0;
-		Check_Next_Cmd();
 	}
+	// Check if there is new modbus frame waiting for us
+	if (__HAL_TIM_GET_COUNTER(&htim16) > MODBUS_FRAME_IDLE) {
+		if (cntBufRecv > 0) {
+			// Switch buffers and signal to main thread
+			ModbusFrame = bufModbus[curBuf];
+			cntModbus = cntBufRecv;
+			curBuf = curBuf ? 0 : 1;
+			// Start new frame reception
+			cntBufRecv = 0;
+		} else
+			HAL_UART_Receive_DMA(&huart1, (uint8_t *) RecvBuf, sizeof(RecvBuf));
+	}
+	// Process modbus frame if we received it
+	if (ModbusFrame) {
+#ifdef SERIAL_DEBUG
+		SerialPrint("F %d, %d, %d)\n", ModbusFrame[0], ModbusFrame[1], cntModbus);
+#endif
+		ProcessModbusFrame(ModbusFrame, cntModbus);
+		ModbusFrame = NULL;
+		cntModbus = 0;
+		__HAL_TIM_SET_COUNTER(&htim16, 0);
+	}
+	// Make sure there is delay before sending reply)
+	if ((cntOut > 0) && (__HAL_TIM_GET_COUNTER(&htim16) > MODBUS_FRAME_IDLE)) {
+#ifdef SERIAL_DEBUG
+		SerialPrint("R %d\n", cntOut);
+#endif
+		SerialPut(bufModbusOut, cntOut);
+		cntOut = 0;
+	}
+	// HAL_IWDG_Refresh(&hiwdg);
 } // void loop()

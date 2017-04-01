@@ -37,11 +37,17 @@
 // PWM output channels number
 #define MY_PWM_CHANNELS 4
 
-// Maximum command length
-#define MAX_COMMAND_LENGTH 16
+// Modbus frame receive buffer size
+#define MODBUS_FRAME_BUFFER 256
 
 // Time period for reporting ADC values (in ms)
 #define REPORT_PERIOD 500
+
+// Modbus idle timer before start new frame (in microseconds)
+#define MODBUS_FRAME_IDLE 1750
+
+// Default modbus slave address (must be 0xFF if you want to change it later)
+#define MODBUS_ADDRESS 247
 
 // main setup/loop routines
 extern void Setup();
@@ -53,6 +59,7 @@ extern DMA_HandleTypeDef hdma_adc;
 extern UART_HandleTypeDef huart1;
 extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim14;
+extern TIM_HandleTypeDef htim16;
 extern IWDG_HandleTypeDef hiwdg;
 
 // Voltage reference correction, should be 3300 (but in real life...)

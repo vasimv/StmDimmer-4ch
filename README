@@ -1,0 +1,11 @@
+MODBUS RTU support includes following function codes:
+
+FC03 (read holding output registers) - registers 0..3 (unsigned 16 bit, 0..1023 values) contain PWM output values
+
+FC04 (read input registers) - ADC data (unsigned 16 bit): 0 - input voltage (in mV), 1 - MCU supply voltage (in mV), 2 - MCU internal temperature sensor (in celsius, *100), 3 - Photoresistor 1 value, 4 - Photoresistor 2 (or Thermistor) value, 5 - ADC3 input voltage (1:5 divider, in mV), 6 - ADC5 input voltage (1:5 divider, in mV)
+
+FC06 (write holding output register) - write PWM output value (see FC03), register with address 0x100 changes slave ID if it was set to 0xff (one time only, will require flash erase to reprogram!!!)
+
+FC16 (write multiple holding output registers) - write PWM output values (see FC03)
+
+Slave ID (in dimmer.h) is 0xf7. If you want to change it by FC06 write - set to 0xff
