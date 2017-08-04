@@ -20,7 +20,10 @@
 #define DIMMER_H_
 
 // Debug info over serial interface
-//#define SERIAL_DEBUG
+#define SERIAL_DEBUG
+
+// v3 hardware - RS-485 control on PA14 and FAN (instead ADC input #5)
+#define DIMMER_V3
 
 // Resistors divider ratio (43K/(1/(1/11K+1/MCU_INPUT_RESISTANCE)))
 #define DIVIDER_RATIO 4.93
@@ -32,10 +35,17 @@
 #define PWMRANGE 1022
 
 // ADC channels number (5 ADC inputs + Temperature + Vdd)
+#ifndef DIMMER_V3
 #define MY_ADC_CHANNELS 7
+#else
+#define MY_ADC_CHANNELS 6
+#endif
 
 // PWM output channels number
 #define MY_PWM_CHANNELS 4
+
+// Serial speed (38400 8n1)
+#define SERIAL_BAUD 38400
 
 // Modbus frame receive buffer size
 #define MODBUS_FRAME_BUFFER 256

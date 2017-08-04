@@ -109,6 +109,7 @@ void SerialPrint(char *fmt, ...) {
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	int len;
 
+	__HAL_UART_FLUSH_DRREGISTER(&huart1);
 	// Check idle time for modbus
 	if (__HAL_TIM_GET_COUNTER(&htim16) > MODBUS_FRAME_IDLE) {
 		if (cntBufRecv > 0) {
@@ -354,13 +355,13 @@ void UpdateThings() {
 	}
 	AdcCount = 0;
 	// Calculate Vdd based on VREFINT_CAL, then use it to calculate other stuff
-	Vdd = VREF_CORRECTION * VREFINT_CAL / AdcAvgData[6];
+	Vdd = VREF_CORRECTION * VREFINT_CAL / AdcAvgData[MY_ADC_CHANNELS - 1];
 	Vin = (Vdd * AdcAvgData[0]) / (uint16_t) (4095 / DIVIDER_RATIO);
 	Vphr1 = (Vdd * AdcAvgData[1]) / (uint16_t) 4095;
 	Vphr2 = (Vdd * AdcAvgData[2]) / (uint16_t) 4095;
 	Vadc3 = (Vdd * AdcAvgData[3]) / (uint16_t) (4095 / DIVIDER_RATIO);
 	Vadc5 = (Vdd * AdcAvgData[4]) / (uint16_t) (4095 / DIVIDER_RATIO);
-	Tchip = (((int32_t) AdcAvgData[5]) *  Vdd / (int32_t) 3300) - (int32_t) TS_CAL1;
+	Tchip = (((int32_t) AdcAvgData[MY_ADC_CHANNELS - 2]) *  Vdd / (int32_t) 3300) - (int32_t) TS_CAL1;
 	Tchip *= (int32_t)(11000 - 3000);
 	Tchip = Tchip / (int32_t)( TS_CAL2 - TS_CAL1);
 	Tchip += 3000;
@@ -390,6 +391,7 @@ void StartSerial() {
 #ifdef SERIAL_DEBUG
 	SerialPrint("D!\n");
 #endif
+	__HAL_UART_FLUSH_DRREGISTER(&huart1);
 	HAL_UART_Receive_DMA(&huart1, (uint8_t *) RecvBuf, sizeof(RecvBuf));
 } // void StartSerial()
 
@@ -469,12 +471,20 @@ void Loop() {
 		cntModbus = 0;
 		__HAL_TIM_SET_COUNTER(&htim16, 0);
 	}
-	// Make sure there is delay before sending reply)
+	// Make sure there is delay before sending reply
 	if ((cntOut > 0) && (__HAL_TIM_GET_COUNTER(&htim16) > MODBUS_FRAME_IDLE)) {
 #ifdef SERIAL_DEBUG
 		SerialPrint("R %d\n", cntOut);
 #endif
+#ifdef DIMMER_V3
+		// DE/~RE -> 1
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_14, GPIO_PIN_SET);
+#endif
 		SerialPut(bufModbusOut, cntOut);
+#ifdef DIMMER_V3
+		// DE/~RE -> 0
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_14, GPIO_PIN_RESET);
+#endif
 		cntOut = 0;
 	}
 	// HAL_IWDG_Refresh(&hiwdg);
