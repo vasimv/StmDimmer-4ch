@@ -356,7 +356,7 @@ void UpdateThings() {
 	AdcCount = 0;
 	// Calculate Vdd based on VREFINT_CAL, then use it to calculate other stuff
 	Vdd = VREF_CORRECTION * VREFINT_CAL / AdcAvgData[MY_ADC_CHANNELS - 1];
-	Vin = (Vdd * AdcAvgData[0]) / (uint16_t) (4095 / DIVIDER_RATIO);
+	Vin = (Vdd * AdcAvgData[0]) / (uint16_t) (4095 / VIN_DIVIDER_RATIO);
 	Vphr1 = (Vdd * AdcAvgData[1]) / (uint16_t) 4095;
 	Vphr2 = (Vdd * AdcAvgData[2]) / (uint16_t) 4095;
 	Vadc3 = (Vdd * AdcAvgData[3]) / (uint16_t) (4095 / DIVIDER_RATIO);

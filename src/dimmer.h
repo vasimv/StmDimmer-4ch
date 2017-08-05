@@ -28,6 +28,13 @@
 // Resistors divider ratio (43K/(1/(1/11K+1/MCU_INPUT_RESISTANCE)))
 #define DIVIDER_RATIO 4.93
 
+// Resistors divider ratio for main voltage (43K/11K for v1/v2 and 120K/11K for V3)
+#ifdef DIMMER_V3
+#define VIN_DIVIDER_RATIO 11.909
+#else
+#define VIN_DIVIDER_RATIO 4.93
+#endif
+
 // PWM prescaler - 1, from 24 MHz (2 for 125ns pulse units, 5 for 250ns pulse units, 23 for 1 us pulse units)
 #define PWMPRESCALER 23
 
