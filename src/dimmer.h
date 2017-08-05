@@ -20,7 +20,7 @@
 #define DIMMER_H_
 
 // Debug info over serial interface
-#define SERIAL_DEBUG
+// #define SERIAL_DEBUG
 
 // v3 hardware - RS-485 control on PA14 and FAN (instead ADC input #5)
 #define DIMMER_V3

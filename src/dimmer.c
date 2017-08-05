@@ -73,6 +73,16 @@ uint16_t cntModbus = 0;
 uint8_t bufModbusOut[64];
 uint16_t cntOut = 0;
 
+// FAN PWM (0/25/50/75/100%) variables
+// Vphr2 value when we start the fan (25%)
+uint16_t fanStart = 1300;
+// Vphr2 value when fan should be at maximum (100%)
+uint16_t fanMax = 1600;
+// Current FAN pwm output (0..4)
+volatile uint8_t fanOut = 0;
+// Current fan cycle (0..3)
+volatile uint8_t fanCycle = 0;
+
 void PWM_Timer_Set(TIM_HandleTypeDef *phtim, uint32_t channel, uint32_t pulse, uint8_t inverted);
 
 volatile uint8_t txDoneFlag = 1;
@@ -203,6 +213,12 @@ void SetRegister(uint16_t Addr, uint16_t Val) {
 		Pwm[3] = Val;
 		PWM_Timer_Set(&htim3, TIM_CHANNEL_2, Val, 1);
 		break;
+	case 8:
+		fanStart = Val;
+		break;
+	case 9:
+		fanMax = Val;
+		break;
 	case 256:
 		// Set my modbus address (it is one-time thing, you will have to erase FLASH to reset!!!
 		MyModbusAddress = Val;
@@ -230,6 +246,12 @@ uint16_t GetRegister(uint16_t Addr) {
 		return Vadc3;
 	case 6:
 		return Vadc5;
+	case 7:
+		return fanOut;
+	case 8:
+		return fanStart;
+	case 9:
+		return fanMax;
 	default:
 		break;
 	}
@@ -346,6 +368,33 @@ int ProcessModbusFrame(uint8_t *Frame, uint16_t len) {
 	AddModbusCrc();
 } // void ProcessModbusFrame()
 
+// Calculate fan PWM output based on settings and temperature
+uint8_t calcFanPWM(uint32_t t) {
+	uint16_t diff1, diff2;
+
+	if (t < fanStart) {
+		return 0;
+	}
+	if ((t >= fanMax) || (fanMax <= fanStart)) {
+		return 8;
+	}
+	diff1 = fanMax - fanStart;
+	diff2 = t - fanStart;
+	return (diff2 * 7) / diff1 + 1;
+} // uint8_t calcFanPWM(uint32_t t)
+
+// Update FAN soft-pwm output (PA5)
+void HAL_SYSTICK_Callback() {
+	fanCycle = (fanCycle + 1) % 8;
+	if (fanOut > 0) {
+		if (fanCycle == 0)
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+		if (fanCycle >= fanOut)
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+	} else
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+} // void HAL_SYSTICK_Callback()
+
 // Read values from ADC buffer and calculate voltages
 void UpdateThings() {
 	// Calculate averages for readings
@@ -370,6 +419,7 @@ void UpdateThings() {
 //				AdcData[0], AdcData[1], AdcData[2], AdcData[3], AdcData[4], AdcData[5], AdcData[6]);
 //	SerialPrint("Cnt: %u, Vdd: %u, Tchip: %u, Vin: %u\n", AdcCount, Vdd, Tchip, Vin);
 //#endif
+	fanOut = calcFanPWM(Vphr2);
 } // void UpdateThings()
 
 // Start 12-bit ADC (5 ADC channels, temperature, vrefint)
@@ -445,8 +495,8 @@ void Loop() {
 		UpdateThings();
 		LastUpdate = HAL_GetTick();
 #ifdef SERIAL_DEBUG
- 	SerialPrint("0:%d\n1:%d\n2:%d\n3:%d\n4:%d\n5:%d\n6:%d\n",
-				Vin, Vphr1, Vphr2, Vadc3, Vadc5, Vdd, Tchip);
+ 	SerialPrint("0:%d\n1:%d\n2:%d\n3:%d\n4:%d\n5:%d\n6:%d\n7:%d\n8:%d\n9:%d\n",
+				Vin, Vphr1, Vphr2, Vadc3, Vadc5, Vdd, Tchip, fanOut, fanStart, fanMax);
 #endif
 	}
 	// Check if there is new modbus frame waiting for us
