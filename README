@@ -9,3 +9,5 @@ FC06 (write holding output register) - write PWM output value (see FC03), regist
 FC16 (write multiple holding output registers) - write PWM output and fan values (see FC06)
 
 Slave ID (in dimmer.h) is 0xf7. If you want to change it by FC06 write - set to 0xff
+
+Schematics in PCB directory, board can be ordered on https://oshpark.com/shared_projects/c1BDQ9yI

@@ -36,7 +36,7 @@
 #endif
 
 // PWM prescaler - 1, from 24 MHz (2 for 125ns pulse units, 5 for 250ns pulse units, 23 for 1 us pulse units)
-#define PWMPRESCALER 23
+#define PWMPRESCALER 12
 
 // PWM period (in pulse units)
 #define PWMRANGE 1022
